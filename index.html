@@ -1,1 +1,278 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ApulianChain</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000510; font-family: 'Courier New', Courier, monospace; }
+        
+        #ui-layer {
+            position: absolute; top: 20px; left: 20px; color: #00ffcc; z-index: 10; pointer-events: none;
+            text-shadow: 0 0 10px rgba(0, 255, 204, 0.5);
+        }
+        h1 { margin: 0; font-size: 1.8rem; text-transform: uppercase; border-bottom: 2px solid #00ffcc; display: inline-block; }
+        
+        /* Stile PIN - Tech Style */
+        .map-label {
+            display: flex; flex-direction: column; align-items: center; cursor: pointer;
+            pointer-events: auto; transition: all 0.3s;
+        }
+        .map-label:hover .pin-logo {
+            box-shadow: 0 0 20px #00ffcc, 0 0 40px #00ffcc;
+            transform: scale(1.1);
+            border-color: #fff;
+        }
+        .pin-logo {
+            width: 40px; height: 40px; background: #000; border-radius: 50%;
+            border: 2px solid #00ffcc; object-fit: cover;
+            box-shadow: 0 0 10px rgba(0, 255, 204, 0.3);
+        }
+        .pin-name {
+            margin-top: 8px; color: #00ffcc; background: rgba(0, 10, 20, 0.8);
+            padding: 4px 8px; font-size: 11px; border: 1px solid #00ffcc;
+            text-transform: uppercase; letter-spacing: 1px;
+            opacity: 0.8;
+        }
+        .map-label:hover .pin-name { opacity: 1; background: #000; }
+    </style>
 
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <h1>Puglia Sat View</h1>
+        <p>Clicca un punto per zoomare! (OpenStreetMap Source)</p>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+        // --- VARIABILI GLOBALI PER INTERAZIONE E ANIMAZIONE ---
+        const raycaster = new THREE.Raycaster();
+        const pointer = new THREE.Vector2();
+        const clickableObjects = []; // Array per i marker 3D
+        
+        let isAnimating = false;
+        let cameraTargetPosition = new THREE.Vector3();
+        let controlsTargetPosition = new THREE.Vector3();
+
+
+        // --- CONFIGURAZIONE BOUNDS (Confini Puglia) ---
+        const BOUNDS = {
+            minLon: 14.8, 
+            maxLon: 18.6, 
+            minLat: 39.7, 
+            maxLat: 42.0 
+        };
+
+        const latDist = (BOUNDS.maxLat - BOUNDS.minLat) * 111;
+        const lonDist = (BOUNDS.maxLon - BOUNDS.minLon) * 84;
+        const aspectRatio = lonDist / latDist;
+        const mapWidth = 40; 
+        const mapHeight = mapWidth / aspectRatio;
+
+        // --- 2. SETUP SCENA ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x020205);
+        scene.fog = new THREE.FogExp2(0x020205, 0.02);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 35, 30); 
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const labelRenderer = new CSS2DRenderer();
+        labelRenderer.setSize(window.innerWidth, window.innerHeight);
+        labelRenderer.domElement.style.position = 'absolute';
+        labelRenderer.domElement.style.top = '0px';
+        document.body.appendChild(labelRenderer.domElement);
+
+        const controls = new OrbitControls(camera, labelRenderer.domElement);
+        controls.enableDamping = true;
+        controls.maxPolarAngle = Math.PI / 2.1;
+        controls.minDistance = 10;
+        controls.maxDistance = 100;
+
+        // --- SHADER E MAPPA (come prima) ---
+        const vertexShader = `
+            varying vec2 vUv;
+            void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `;
+
+        const fragmentShader = `
+            uniform sampler2D mapTexture;
+            varying vec2 vUv;
+
+            void main() {
+                vec4 color = texture2D(mapTexture, vUv);
+                float gray = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+                float inverted = 1.0 - gray;
+                vec3 darkColor = vec3(0.0, 0.05, 0.15);
+                vec3 lightColor = vec3(0.0, 1.0, 0.8);
+
+                vec3 finalColor = mix(darkColor, lightColor, pow(inverted, 3.0));
+
+                gl_FragColor = vec4(finalColor, 1.0); 
+            }
+        `;
+
+        const textureLoader = new THREE.TextureLoader();
+        const mapUrl = 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/ba/Map_of_Apulia%2C_Italy.svg/1666px-Map_of_Apulia%2C_Italy.svg.png'; 
+
+        const mapTexture = textureLoader.load(mapUrl);
+        
+        const planeMaterial = new THREE.ShaderMaterial({
+            uniforms: { mapTexture: { value: mapTexture } },
+            vertexShader: vertexShader,
+            fragmentShader: fragmentShader,
+            side: THREE.DoubleSide
+        });
+
+        const planeGeometry = new THREE.PlaneGeometry(mapWidth, mapHeight);
+        const plane = new THREE.Mesh(planeGeometry, planeMaterial);
+        plane.rotation.x = -Math.PI / 2;
+        scene.add(plane);
+
+        // Griglia Tech di sfondo
+        const grid = new THREE.GridHelper(100, 40, 0x004444, 0x001111);
+        grid.position.y = -0.1;
+        scene.add(grid);
+
+        // --- 3. PIN DEI SOCI E LOGICA DI CLICK ---
+        function createPin(socio) {
+            // ... (Creazione degli elementi HTML div, img, name, label - NESSUNA MODIFICA QUI) ...
+            const div = document.createElement('div');
+            div.className = 'map-label';
+            const img = document.createElement('img');
+            img.src = socio.logo;
+            img.className = 'pin-logo';
+            div.appendChild(img);
+            const name = document.createElement('span');
+            name.textContent = socio.nome;
+            name.className = 'pin-name';
+            div.appendChild(name);
+            const label = new CSS2DObject(div);
+
+            // Conversione Lat/Lon -> X/Z
+            const xPct = (socio.lon - BOUNDS.minLon) / (BOUNDS.maxLon - BOUNDS.minLon);
+            const yPct = (socio.lat - BOUNDS.minLat) / (BOUNDS.maxLat - BOUNDS.minLat);
+            const x3D = (xPct - 0.5) * mapWidth;
+            const z3D = -(yPct - 0.5) * mapHeight;
+
+            label.position.set(x3D, 1.5, z3D);
+            scene.add(label);
+
+            // Marker luminoso alla base
+            const markerGeo = new THREE.RingGeometry(0.15, 0.25, 32);
+            const markerMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, side: THREE.DoubleSide });
+            const marker = new THREE.Mesh(markerGeo, markerMat);
+            marker.position.set(x3D, 0.05, z3D);
+            marker.rotation.x = -Math.PI / 2;
+            scene.add(marker);
+            
+            // **IMPORTANTE: Colleghiamo i dati al Marker 3D per il Raycasting**
+            marker.userData.targetPosition = new THREE.Vector3(x3D, 15, z3D); // Posizione zoomata (sopra il pin)
+            marker.userData.lookAtPosition = new THREE.Vector3(x3D, 0, z3D); // Punto da guardare (il pin)
+            marker.name = socio.nome;
+            clickableObjects.push(marker);
+        }
+
+        const soci = [
+            { nome: "BARI HQ", lat: 41.1171, lon: 16.8719, logo: "https://via.placeholder.com/40/000/0FF?text=BA" },
+            { nome: "LECCE HUB", lat: 40.3515, lon: 18.1750, logo: "https://via.placeholder.com/40/000/0FF?text=LE" },
+            { nome: "FOGGIA LAB", lat: 41.4622, lon: 15.5447, logo: "https://via.placeholder.com/40/000/0FF?text=FG" },
+            { nome: "TARANTO IND", lat: 40.4644, lon: 17.2470, logo: "https://via.placeholder.com/40/000/0FF?text=TA" },
+        ];
+        soci.forEach(createPin);
+
+
+        // --- FUNZIONE DI GESTIONE CLICK ---
+        function onPointerClick(event) {
+            // Calcolo coordinate mouse normalizzate (-1 to +1)
+            pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
+            pointer.y = - (event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(pointer, camera);
+
+            // Intersezioni con gli oggetti cliccabili
+            const intersects = raycaster.intersectObjects(clickableObjects, false);
+
+            if (intersects.length > 0) {
+                // Trovato un pin cliccato
+                const clickedMarker = intersects[0].object;
+                
+                // Disabilita i controlli utente per avviare l'animazione fluida
+                controls.enabled = false;
+                
+                // Imposta i target per la telecamera e i controlli
+                cameraTargetPosition.copy(clickedMarker.userData.targetPosition);
+                controlsTargetPosition.copy(clickedMarker.userData.lookAtPosition);
+                
+                isAnimating = true;
+            }
+        }
+
+        // Aggiungi il listener di click al canvas WebGL
+        renderer.domElement.addEventListener('pointerdown', onPointerClick);
+
+
+        // --- 4. LOOP DI ANIMAZIONE CON ZOOM ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (isAnimating) {
+                const lerpFactor = 0.05; // Velocità di animazione (valori più bassi = più lento)
+
+                // 1. Interpola la posizione della telecamera
+                camera.position.lerp(cameraTargetPosition, lerpFactor);
+                
+                // 2. Interpola il punto a cui la telecamera sta guardando (il target di OrbitControls)
+                controls.target.lerp(controlsTargetPosition, lerpFactor);
+                
+                // 3. Aggiorna i controlli dopo la modifica di target
+                controls.update();
+
+                // Controllo di fine animazione (se la distanza è molto piccola)
+                if (camera.position.distanceTo(cameraTargetPosition) < 0.1) {
+                    isAnimating = false;
+                    controls.enabled = true; // Riabilita i controlli
+                    
+                    // Fissa i valori finali per eliminare fluttuazioni residue
+                    camera.position.copy(cameraTargetPosition);
+                    controls.target.copy(controlsTargetPosition);
+                }
+            } else {
+                // Se non in animazione, aggiorna i controlli normalmente (es. rotazione utente)
+                controls.update(); 
+            }
+            
+            renderer.render(scene, camera);
+            labelRenderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            labelRenderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
